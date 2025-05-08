@@ -35,6 +35,7 @@
 #include "scene/3d/skeleton_3d.h"
 #endif //_DISABLE_DEPRECATED
 
+
 bool PhysicalBone3D::JointData::_set(const StringName &p_name, const Variant &p_value, RID j) {
 	return false;
 }
@@ -104,6 +105,132 @@ void PhysicalBone3D::reset_to_rest_position() {
 		}
 	}
 }
+
+int PhysicalBone3D::get_max_contacts_reported() const {
+	return max_contacts_reported;
+}
+
+int PhysicalBone3D::get_contact_count() const {
+	return contact_count;
+}
+
+void PhysicalBone3D::set_max_contacts_reported(int p_amount) {
+	ERR_FAIL_INDEX_MSG(p_amount, MAX_CONTACTS_REPORTED_3D_MAX, "Max contacts reported allocates memory (about 80 bytes each), and therefore must not be set too high.");
+	max_contacts_reported = p_amount;
+	PhysicsServer3D::get_singleton()->body_set_max_contacts_reported(get_rid(), p_amount);
+}
+
+void PhysicalBone3D::_body_enter_tree(ObjectID p_id) {
+	Object *obj = ObjectDB::get_instance(p_id);
+	Node *node = Object::cast_to<Node>(obj);
+	ERR_FAIL_NULL(node);
+	ERR_FAIL_NULL(contact_monitor);
+	HashMap<ObjectID, BodyState>::Iterator E = contact_monitor->body_map.find(p_id);
+	ERR_FAIL_COND(!E);
+	ERR_FAIL_COND(E->value.in_tree);
+
+	E->value.in_tree = true;
+
+	contact_monitor->locked = true;
+
+	emit_signal(SceneStringName(body_entered), node);
+
+	for (int i = 0; i < E->value.shapes.size(); i++) {
+		emit_signal(SceneStringName(body_shape_entered), E->value.rid, node, E->value.shapes[i].body_shape, E->value.shapes[i].local_shape);
+	}
+
+	contact_monitor->locked = false;
+}
+
+void PhysicalBone3D::_body_exit_tree(ObjectID p_id) {
+	Object *obj = ObjectDB::get_instance(p_id);
+	Node *node = Object::cast_to<Node>(obj);
+	ERR_FAIL_NULL(node);
+	ERR_FAIL_NULL(contact_monitor);
+	HashMap<ObjectID, BodyState>::Iterator E = contact_monitor->body_map.find(p_id);
+	ERR_FAIL_COND(!E);
+	ERR_FAIL_COND(!E->value.in_tree);
+	E->value.in_tree = false;
+
+	contact_monitor->locked = true;
+
+	emit_signal(SceneStringName(body_exited), node);
+
+	for (int i = 0; i < E->value.shapes.size(); i++) {
+		emit_signal(SceneStringName(body_shape_exited), E->value.rid, node, E->value.shapes[i].body_shape, E->value.shapes[i].local_shape);
+	}
+
+	contact_monitor->locked = false;
+}
+
+void PhysicalBone3D::_body_inout(int p_status, const RID &p_body, ObjectID p_instance, int p_body_shape, int p_local_shape) {
+	bool body_in = p_status == 1;
+	ObjectID objid = p_instance;
+
+	Object *obj = ObjectDB::get_instance(objid);
+	Node *node = Object::cast_to<Node>(obj);
+
+	ERR_FAIL_NULL(contact_monitor);
+	HashMap<ObjectID, BodyState>::Iterator E = contact_monitor->body_map.find(objid);
+
+	ERR_FAIL_COND(!body_in && !E);
+
+	if (body_in) {
+		if (!E) {
+			E = contact_monitor->body_map.insert(objid, BodyState());
+			E->value.rid = p_body;
+			//E->value.rc=0;
+			E->value.in_tree = node && node->is_inside_tree();
+			if (node) {
+				node->connect(SceneStringName(tree_entered), callable_mp(this, &PhysicalBone3D::_body_enter_tree).bind(objid));
+				node->connect(SceneStringName(tree_exiting), callable_mp(this, &PhysicalBone3D::_body_exit_tree).bind(objid));
+				if (E->value.in_tree) {
+					emit_signal(SceneStringName(body_entered), node);
+				}
+			}
+		}
+		//E->value.rc++;
+		if (node) {
+			E->value.shapes.insert(ShapePair(p_body_shape, p_local_shape));
+		}
+
+		if (E->value.in_tree) {
+			emit_signal(SceneStringName(body_shape_entered), p_body, node, p_body_shape, p_local_shape);
+		}
+
+	} else {
+		//E->value.rc--;
+
+		if (node) {
+			E->value.shapes.erase(ShapePair(p_body_shape, p_local_shape));
+		}
+
+		bool in_tree = E->value.in_tree;
+
+		if (E->value.shapes.is_empty()) {
+			if (node) {
+				node->disconnect(SceneStringName(tree_entered), callable_mp(this, &PhysicalBone3D::_body_enter_tree));
+				node->disconnect(SceneStringName(tree_exiting), callable_mp(this, &PhysicalBone3D::_body_exit_tree));
+				if (in_tree) {
+					emit_signal(SceneStringName(body_exited), node);
+				}
+			}
+
+			contact_monitor->body_map.remove(E);
+		}
+		if (node && in_tree) {
+			emit_signal(SceneStringName(body_shape_exited), p_body, obj, p_body_shape, p_local_shape);
+		}
+	}
+}
+
+struct _PhysicalBoneBodyInOut {
+	RID rid;
+	ObjectID id;
+	int shape = 0;
+	int local_shape = 0;
+};
+
 
 bool PhysicalBone3D::PinJointData::_set(const StringName &p_name, const Variant &p_value, RID j) {
 	if (JointData::_set(p_name, p_value, j)) {
@@ -595,6 +722,24 @@ bool PhysicalBone3D::SixDOFJointData::_set(const StringName &p_name, const Varia
 			PhysicsServer3D::get_singleton()->generic_6dof_joint_set_param(j, axis, PhysicsServer3D::G6DOF_JOINT_ANGULAR_SPRING_EQUILIBRIUM_POINT, axis_data[axis].angular_equilibrium_point);
 		}
 
+	} else if ("angular_motor_enabled" == var_name) {
+		axis_data[axis].angular_motor_enabled = p_value;
+		if (is_valid_6dof) {
+			PhysicsServer3D::get_singleton()->generic_6dof_joint_set_flag(j, axis, PhysicsServer3D::G6DOF_JOINT_FLAG_ENABLE_MOTOR, axis_data[axis].angular_motor_enabled);
+		}
+
+	} else if ("target_velocity" == var_name) {
+		axis_data[axis].target_velocity = p_value;
+		if (is_valid_6dof) {
+			PhysicsServer3D::get_singleton()->generic_6dof_joint_set_param(j, axis, PhysicsServer3D::G6DOF_JOINT_ANGULAR_MOTOR_TARGET_VELOCITY, axis_data[axis].target_velocity);
+		}
+
+	} else if ("angular_motor_force_limit" == var_name) {
+			axis_data[axis].angular_motor_force_limit = p_value;
+			if (is_valid_6dof) {
+				PhysicsServer3D::get_singleton()->generic_6dof_joint_set_param(j, axis, PhysicsServer3D::G6DOF_JOINT_ANGULAR_MOTOR_FORCE_LIMIT, axis_data[axis].angular_motor_force_limit);
+			}
+	
 	} else {
 		return false;
 	}
@@ -671,6 +816,12 @@ bool PhysicalBone3D::SixDOFJointData::_get(const StringName &p_name, Variant &r_
 		r_ret = axis_data[axis].angular_spring_damping;
 	} else if ("angular_equilibrium_point" == var_name) {
 		r_ret = axis_data[axis].angular_equilibrium_point;
+	} else if ("angular_motor_enabled" == var_name) {
+		r_ret = axis_data[axis].angular_motor_enabled;
+	} else if ("target_velocity" == var_name) {
+		r_ret = axis_data[axis].target_velocity;
+	} else if ("angular_motor_force_limit" == var_name) {
+		r_ret = axis_data[axis].angular_motor_force_limit;
 	} else {
 		return false;
 	}
@@ -703,6 +854,9 @@ void PhysicalBone3D::SixDOFJointData::_get_property_list(List<PropertyInfo> *p_l
 		p_list->push_back(PropertyInfo(Variant::FLOAT, prefix + PNAME("angular_spring_stiffness")));
 		p_list->push_back(PropertyInfo(Variant::FLOAT, prefix + PNAME("angular_spring_damping")));
 		p_list->push_back(PropertyInfo(Variant::FLOAT, prefix + PNAME("angular_equilibrium_point")));
+		p_list->push_back(PropertyInfo(Variant::BOOL, prefix + PNAME("angular_motor_enabled")));
+		p_list->push_back(PropertyInfo(Variant::FLOAT, prefix + PNAME("target_velocity"), PROPERTY_HINT_NONE, U"radians_as_degrees,suffix:\u00B0/s"));
+		p_list->push_back(PropertyInfo(Variant::FLOAT, prefix + PNAME("angular_motor_force_limit"), PROPERTY_HINT_NONE, U"suffix:kg\u22C5m\u00B2/s\u00B2 (Nm)"));
 	}
 }
 
@@ -791,6 +945,8 @@ void PhysicalBone3D::_sync_body_state(PhysicsDirectBodyState3D *p_state) {
 	set_global_transform(p_state->get_transform());
 	set_ignore_transform_notification(false);
 
+	contact_count = p_state->get_contact_count();
+
 	linear_velocity = p_state->get_linear_velocity();
 	angular_velocity = p_state->get_angular_velocity();
 }
@@ -816,6 +972,83 @@ void PhysicalBone3D::_body_state_changed(PhysicsDirectBodyState3D *p_state) {
 	_sync_body_state(p_state);
 	_on_transform_changed();
 
+	if (contact_monitor) {
+		contact_monitor->locked = true;
+
+		//untag all
+		int rc = 0;
+		for (KeyValue<ObjectID, BodyState> &E : contact_monitor->body_map) {
+			for (int i = 0; i < E.value.shapes.size(); i++) {
+				E.value.shapes[i].tagged = false;
+				rc++;
+			}
+		}
+
+		_PhysicalBoneBodyInOut *toadd = (_PhysicalBoneBodyInOut *)alloca(p_state->get_contact_count() * sizeof(_PhysicalBoneBodyInOut));
+		int toadd_count = 0;
+		PhysicalBone3D_RemoveAction *toremove = (PhysicalBone3D_RemoveAction *)alloca(rc * sizeof(PhysicalBone3D_RemoveAction));
+		int toremove_count = 0;
+
+		//put the ones to add
+
+		for (int i = 0; i < p_state->get_contact_count(); i++) {
+			RID col_rid = p_state->get_contact_collider(i);
+			ObjectID col_obj = p_state->get_contact_collider_id(i);
+			int local_shape = p_state->get_contact_local_shape(i);
+			int col_shape = p_state->get_contact_collider_shape(i);
+
+			HashMap<ObjectID, BodyState>::Iterator E = contact_monitor->body_map.find(col_obj);
+			if (!E) {
+				toadd[toadd_count].rid = col_rid;
+				toadd[toadd_count].local_shape = local_shape;
+				toadd[toadd_count].id = col_obj;
+				toadd[toadd_count].shape = col_shape;
+				toadd_count++;
+				continue;
+			}
+
+			ShapePair sp(col_shape, local_shape);
+			int idx = E->value.shapes.find(sp);
+			if (idx == -1) {
+				toadd[toadd_count].rid = col_rid;
+				toadd[toadd_count].local_shape = local_shape;
+				toadd[toadd_count].id = col_obj;
+				toadd[toadd_count].shape = col_shape;
+				toadd_count++;
+				continue;
+			}
+
+			E->value.shapes[idx].tagged = true;
+		}
+
+		//put the ones to remove
+
+		for (const KeyValue<ObjectID, BodyState> &E : contact_monitor->body_map) {
+			for (int i = 0; i < E.value.shapes.size(); i++) {
+				if (!E.value.shapes[i].tagged) {
+					toremove[toremove_count].rid = E.value.rid;
+					toremove[toremove_count].body_id = E.key;
+					toremove[toremove_count].pair = E.value.shapes[i];
+					toremove_count++;
+				}
+			}
+		}
+
+		//process removals
+
+		for (int i = 0; i < toremove_count; i++) {
+			_body_inout(0, toremove[i].rid, toremove[i].body_id, toremove[i].pair.body_shape, toremove[i].pair.local_shape);
+		}
+
+		//process additions
+
+		for (int i = 0; i < toadd_count; i++) {
+			_body_inout(1, toadd[i].rid, toadd[i].id, toadd[i].shape, toadd[i].local_shape);
+		}
+
+		contact_monitor->locked = false;
+	}
+
 	Transform3D global_transform(p_state->get_transform());
 
 	// Update simulator
@@ -826,6 +1059,66 @@ void PhysicalBone3D::_body_state_changed(PhysicsDirectBodyState3D *p_state) {
 			simulator->set_bone_global_pose(bone_id, skeleton->get_global_transform().affine_inverse() * (global_transform * body_offset_inverse));
 		}
 	}
+}
+
+void PhysicalBone3D::set_use_continuous_collision_detection(bool p_enable) {
+	ccd = p_enable;
+	PhysicsServer3D::get_singleton()->body_set_enable_continuous_collision_detection(get_rid(), p_enable);
+}
+
+bool PhysicalBone3D::is_using_continuous_collision_detection() const {
+	return ccd;
+}
+
+void PhysicalBone3D::set_contact_monitor(bool p_enabled) {
+	if (p_enabled == is_contact_monitor_enabled()) {
+		return;
+	}
+
+	if (!p_enabled) {
+		ERR_FAIL_COND_MSG(contact_monitor->locked, "Can't disable contact monitoring during in/out callback. Use call_deferred(\"set_contact_monitor\", false) instead.");
+
+		for (const KeyValue<ObjectID, BodyState> &E : contact_monitor->body_map) {
+			//clean up mess
+			Object *obj = ObjectDB::get_instance(E.key);
+			Node *node = Object::cast_to<Node>(obj);
+
+			if (node) {
+				node->disconnect(SceneStringName(tree_entered), callable_mp(this, &PhysicalBone3D::_body_enter_tree));
+				node->disconnect(SceneStringName(tree_exiting), callable_mp(this, &PhysicalBone3D::_body_exit_tree));
+			}
+		}
+
+		memdelete(contact_monitor);
+		contact_monitor = nullptr;
+	} else {
+		contact_monitor = memnew(ContactMonitor);
+		contact_monitor->locked = false;
+	}
+
+	notify_property_list_changed();
+}
+
+bool PhysicalBone3D::is_contact_monitor_enabled() const {
+	return contact_monitor != nullptr;
+}
+
+TypedArray<Node3D> PhysicalBone3D::get_colliding_bodies() const {
+	ERR_FAIL_NULL_V(contact_monitor, TypedArray<Node3D>());
+
+	TypedArray<Node3D> ret;
+	ret.resize(contact_monitor->body_map.size());
+	int idx = 0;
+	for (const KeyValue<ObjectID, BodyState> &E : contact_monitor->body_map) {
+		Object *obj = ObjectDB::get_instance(E.key);
+		if (!obj) {
+			ret.resize(ret.size() - 1); //ops
+		} else {
+			ret[idx++] = obj;
+		}
+	}
+
+	return ret;
 }
 
 void PhysicalBone3D::_bind_methods() {
@@ -879,6 +1172,17 @@ void PhysicalBone3D::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_angular_velocity", "angular_velocity"), &PhysicalBone3D::set_angular_velocity);
 	ClassDB::bind_method(D_METHOD("get_angular_velocity"), &PhysicalBone3D::get_angular_velocity);
 
+	ClassDB::bind_method(D_METHOD("set_max_contacts_reported", "amount"), &PhysicalBone3D::set_max_contacts_reported);
+	ClassDB::bind_method(D_METHOD("get_max_contacts_reported"), &PhysicalBone3D::get_max_contacts_reported);
+	ClassDB::bind_method(D_METHOD("get_contact_count"), &PhysicalBone3D::get_contact_count);
+
+	ClassDB::bind_method(D_METHOD("set_contact_monitor", "enabled"), &PhysicalBone3D::set_contact_monitor);
+	ClassDB::bind_method(D_METHOD("is_contact_monitor_enabled"), &PhysicalBone3D::is_contact_monitor_enabled);
+
+	ClassDB::bind_method(D_METHOD("set_use_continuous_collision_detection", "enable"), &PhysicalBone3D::set_use_continuous_collision_detection);
+	ClassDB::bind_method(D_METHOD("is_using_continuous_collision_detection"), &PhysicalBone3D::is_using_continuous_collision_detection);
+	ClassDB::bind_method(D_METHOD("get_colliding_bodies"), &PhysicalBone3D::get_colliding_bodies);
+
 	ClassDB::bind_method(D_METHOD("set_use_custom_integrator", "enable"), &PhysicalBone3D::set_use_custom_integrator);
 	ClassDB::bind_method(D_METHOD("is_using_custom_integrator"), &PhysicalBone3D::is_using_custom_integrator);
 
@@ -906,6 +1210,15 @@ void PhysicalBone3D::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "linear_velocity", PROPERTY_HINT_NONE, "suffix:m/s"), "set_linear_velocity", "get_linear_velocity");
 	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "angular_velocity", PROPERTY_HINT_NONE, U"radians_as_degrees,suffix:\u00B0/s"), "set_angular_velocity", "get_angular_velocity");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "can_sleep"), "set_can_sleep", "is_able_to_sleep");
+
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "continuous_cd"), "set_use_continuous_collision_detection", "is_using_continuous_collision_detection");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "contact_monitor"), "set_contact_monitor", "is_contact_monitor_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "max_contacts_reported", PROPERTY_HINT_RANGE, "0,64,1,or_greater"), "set_max_contacts_reported", "get_max_contacts_reported");
+
+	ADD_SIGNAL(MethodInfo("body_shape_entered", PropertyInfo(Variant::RID, "body_rid"), PropertyInfo(Variant::OBJECT, "body", PROPERTY_HINT_RESOURCE_TYPE, "Node"), PropertyInfo(Variant::INT, "body_shape_index"), PropertyInfo(Variant::INT, "local_shape_index")));
+	ADD_SIGNAL(MethodInfo("body_shape_exited", PropertyInfo(Variant::RID, "body_rid"), PropertyInfo(Variant::OBJECT, "body", PROPERTY_HINT_RESOURCE_TYPE, "Node"), PropertyInfo(Variant::INT, "body_shape_index"), PropertyInfo(Variant::INT, "local_shape_index")));
+	ADD_SIGNAL(MethodInfo("body_entered", PropertyInfo(Variant::OBJECT, "body", PROPERTY_HINT_RESOURCE_TYPE, "Node")));
+	ADD_SIGNAL(MethodInfo("body_exited", PropertyInfo(Variant::OBJECT, "body", PROPERTY_HINT_RESOURCE_TYPE, "Node")));
 
 	BIND_ENUM_CONSTANT(DAMP_MODE_COMBINE);
 	BIND_ENUM_CONSTANT(DAMP_MODE_REPLACE);
@@ -1025,6 +1338,9 @@ void PhysicalBone3D::_reload_joint() {
 				PhysicsServer3D::get_singleton()->generic_6dof_joint_set_param(joint, static_cast<Vector3::Axis>(axis), PhysicsServer3D::G6DOF_JOINT_ANGULAR_SPRING_STIFFNESS, g6dofjd->axis_data[axis].angular_spring_stiffness);
 				PhysicsServer3D::get_singleton()->generic_6dof_joint_set_param(joint, static_cast<Vector3::Axis>(axis), PhysicsServer3D::G6DOF_JOINT_ANGULAR_SPRING_DAMPING, g6dofjd->axis_data[axis].angular_spring_damping);
 				PhysicsServer3D::get_singleton()->generic_6dof_joint_set_param(joint, static_cast<Vector3::Axis>(axis), PhysicsServer3D::G6DOF_JOINT_ANGULAR_SPRING_EQUILIBRIUM_POINT, g6dofjd->axis_data[axis].angular_equilibrium_point);
+				PhysicsServer3D::get_singleton()->generic_6dof_joint_set_flag(joint, static_cast<Vector3::Axis>(axis), PhysicsServer3D::G6DOF_JOINT_FLAG_ENABLE_MOTOR, g6dofjd->axis_data[axis].angular_motor_enabled);
+				PhysicsServer3D::get_singleton()->generic_6dof_joint_set_param(joint, static_cast<Vector3::Axis>(axis), PhysicsServer3D::G6DOF_JOINT_ANGULAR_MOTOR_TARGET_VELOCITY, g6dofjd->axis_data[axis].target_velocity);
+				PhysicsServer3D::get_singleton()->generic_6dof_joint_set_param(joint, static_cast<Vector3::Axis>(axis), PhysicsServer3D::G6DOF_JOINT_ANGULAR_MOTOR_FORCE_LIMIT, g6dofjd->axis_data[axis].angular_motor_force_limit);
 			}
 
 		} break;
@@ -1368,3 +1684,5 @@ void PhysicalBone3D::_stop_physics_simulation() {
 		_internal_simulate_physics = false;
 	}
 }
+
+

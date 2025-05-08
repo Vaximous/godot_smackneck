@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include "core/templates/vset.h"
 #include "scene/3d/physics/physics_body_3d.h"
 #include "scene/3d/skeleton_3d.h"
 
@@ -147,6 +148,9 @@ public:
 			real_t angular_spring_stiffness = 0.0;
 			real_t angular_spring_damping = 0.0;
 			real_t angular_equilibrium_point = 0.0;
+			bool angular_motor_enabled = false;
+			real_t target_velocity = 0.0;
+			real_t angular_motor_force_limit = 0.0;
 		};
 
 		virtual JointType get_joint_type() { return JOINT_TYPE_6DOF; }
@@ -156,6 +160,8 @@ public:
 		virtual void _get_property_list(List<PropertyInfo> *p_list) const;
 
 		SixDOFAxisData axis_data[3];
+
+		SixDOFJointData() {}
 	};
 
 private:
@@ -183,8 +189,54 @@ private:
 	Vector3 angular_velocity;
 	real_t gravity_scale = 1.0;
 	bool can_sleep = true;
+	bool ccd = false;
 
+	int max_contacts_reported = 0;
+	int contact_count = 0;
 	bool custom_integrator = false;
+
+	struct ShapePair {
+		int body_shape = 0;
+		int local_shape = 0;
+		bool tagged = false;
+		bool operator<(const ShapePair &p_sp) const {
+			if (body_shape == p_sp.body_shape) {
+				return local_shape < p_sp.local_shape;
+			} else {
+				return body_shape < p_sp.body_shape;
+			}
+		}
+
+		ShapePair() {}
+		ShapePair(int p_bs, int p_ls) {
+			body_shape = p_bs;
+			local_shape = p_ls;
+			tagged = false;
+		}
+	};
+	struct PhysicalBone3D_RemoveAction {
+		RID rid;
+		ObjectID body_id;
+		ShapePair pair;
+	};
+	struct BodyState {
+		RID rid;
+		
+		bool in_tree = false;
+		VSet<ShapePair> shapes;
+	};
+
+	struct ContactMonitor {
+		bool locked = false;
+		HashMap<ObjectID, BodyState> body_map;
+	};
+
+	ContactMonitor *contact_monitor = nullptr;
+	void _body_enter_tree(ObjectID p_id);
+	void _body_exit_tree(ObjectID p_id);
+
+	void _body_inout(int p_status, const RID &p_body, ObjectID p_instance, int p_body_shape, int p_local_shape);
+
 
 	DampMode linear_damp_mode = DAMP_MODE_COMBINE;
 	DampMode angular_damp_mode = DAMP_MODE_COMBINE;
@@ -287,6 +339,18 @@ public:
 
 	void apply_central_impulse(const Vector3 &p_impulse);
 	void apply_impulse(const Vector3 &p_impulse, const Vector3 &p_position = Vector3());
+
+	void set_contact_monitor(bool p_enabled);
+	bool is_contact_monitor_enabled() const;
+
+	void set_max_contacts_reported(int p_amount);
+	int get_max_contacts_reported() const;
+	int get_contact_count() const;
+
+	void set_use_continuous_collision_detection(bool p_enable);
+	bool is_using_continuous_collision_detection() const;
+
+	TypedArray<Node3D> get_colliding_bodies() const;
 
 	void reset_physics_simulation_state();
 	void reset_to_rest_position();

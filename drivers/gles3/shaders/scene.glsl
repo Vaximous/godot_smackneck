@@ -1164,7 +1164,7 @@ float sample_shadow(highp sampler2DShadow shadow, float shadow_pixel_size, vec4 
 	avg += textureProjLod(shadow, vec4(pos.xy + vec2(-shadow_pixel_size, shadow_pixel_size), pos.zw), 0.0);
 	avg += textureProjLod(shadow, vec4(pos.xy + vec2(shadow_pixel_size, -shadow_pixel_size), pos.zw), 0.0);
 	avg += textureProjLod(shadow, vec4(pos.xy + vec2(-shadow_pixel_size, -shadow_pixel_size), pos.zw), 0.0);
-	return avg * (1.0 / 13.0);
+	return (avg * (1.0 / 13.0)) > 0.5 ? 1.0 : 0.0;
 #endif
 
 #ifdef SHADOW_MODE_PCF_5
@@ -1173,11 +1173,11 @@ float sample_shadow(highp sampler2DShadow shadow, float shadow_pixel_size, vec4 
 	avg += textureProjLod(shadow, vec4(pos.xy + vec2(-shadow_pixel_size, 0.0), pos.zw), 0.0);
 	avg += textureProjLod(shadow, vec4(pos.xy + vec2(0.0, shadow_pixel_size), pos.zw), 0.0);
 	avg += textureProjLod(shadow, vec4(pos.xy + vec2(0.0, -shadow_pixel_size), pos.zw), 0.0);
-	return avg * (1.0 / 5.0);
+	return (avg * (1.0 / 5.0)) > 0.5 ? 1.0 : 0.0;
 
 #endif
 
-	return avg;
+	return avg > 0.5 ? 1.0 : 0.0;
 }
 #endif //!defined(ADDITIVE_OMNI)
 #endif // USE_ADDITIVE_LIGHTING
@@ -2030,7 +2030,7 @@ void main() {
 	specular_light = mix(specular_light, custom_radiance.rgb, custom_radiance.a);
 #endif // CUSTOM_RADIANCE_USED
 
-#if !defined(USE_LIGHTMAP) && !defined(USE_LIGHTMAP_CAPTURE)
+#ifndef USE_LIGHTMAP
 	//lightmap overrides everything
 	if (scene_data.use_ambient_light) {
 		ambient_light = scene_data.ambient_light_color_energy.rgb;
@@ -2050,7 +2050,7 @@ void main() {
 		}
 #endif // DISABLE_REFLECTION_PROBE
 	}
-#endif // !USE_LIGHTMAP && !USE_LIGHTMAP_CAPTURE
+#endif // USE_LIGHTMAP
 
 #if defined(CUSTOM_IRRADIANCE_USED)
 	ambient_light = mix(ambient_light, custom_irradiance.rgb, custom_irradiance.a);
@@ -2499,7 +2499,7 @@ void main() {
 	float omni_shadow = 1.0f;
 #ifndef SHADOWS_DISABLED
 	vec3 light_ray = ((positional_shadows[positional_shadow_index].shadow_matrix * vec4(shadow_coord.xyz, 1.0))).xyz;
-	omni_shadow = texture(omni_shadow_texture, vec4(light_ray, 1.0 - length(light_ray) * omni_lights[omni_light_index].inv_radius));
+	omni_shadow = texture(omni_shadow_texture, vec4(light_ray, 1.0 - length(light_ray) * omni_lights[omni_light_index].inv_radius)) > 0.5 ? 1.0 : 0.0;
 	omni_shadow = mix(1.0, omni_shadow, omni_lights[omni_light_index].shadow_opacity);
 #endif // SHADOWS_DISABLED
 
