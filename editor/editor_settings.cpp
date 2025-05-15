@@ -324,8 +324,12 @@ void EditorSettings::_get_property_list(List<PropertyInfo> *p_list) const {
 }
 
 void EditorSettings::_add_property_info_bind(const Dictionary &p_info) {
-	ERR_FAIL_COND(!p_info.has("name"));
-	ERR_FAIL_COND(!p_info.has("type"));
+	ERR_FAIL_COND_MSG(!p_info.has("name"), "Property info is missing \"name\" field.");
+	ERR_FAIL_COND_MSG(!p_info.has("type"), "Property info is missing \"type\" field.");
+
+	if (p_info.has("usage")) {
+		WARN_PRINT("\"usage\" is not supported in add_property_info().");
+	}
 
 	PropertyInfo pinfo;
 	pinfo.name = p_info["name"];
@@ -690,6 +694,8 @@ void EditorSettings::_load_defaults(Ref<ConfigFile> p_extra_config) {
 	_load_godot2_text_editor_theme();
 
 	// Appearance
+	EDITOR_SETTING_BASIC(Variant::BOOL, PROPERTY_HINT_NONE, "text_editor/appearance/enable_inline_color_picker", true, "");
+
 	// Appearance: Caret
 	EDITOR_SETTING(Variant::INT, PROPERTY_HINT_ENUM, "text_editor/appearance/caret/type", 0, "Line,Block")
 	_initial_set("text_editor/appearance/caret/caret_blink", true, true);
@@ -2162,7 +2168,7 @@ void EditorSettings::get_argument_options(const StringName &p_function, int p_id
 				r_options->push_back(section.quote());
 			}
 		} else if (pf == "set_builtin_action_override") {
-			for (const StringName &action : InputMap::get_singleton()->get_actions()) {
+			for (const Variant &action : InputMap::get_singleton()->get_actions()) {
 				r_options->push_back(String(action).quote());
 			}
 		}
